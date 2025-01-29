@@ -222,6 +222,75 @@ def make_scalar_mismatch_msg(
     )
 
 
+def small_tensor_string(
+    t, name="", row_limit=50, col_limit=150, min_important_value=1e-5
+):
+    # unfortunately, pytest obscures this value so I just made the col_limit
+    # default something that works with my terminal.
+    # col_limit = col_limit or shutil.get_terminal_size().columns
+    shape = "x".join([str(i) for i in t.shape])
+    if len(t.shape) > 2:
+        t = t.squeeze()
+    if len(t.shape) < 2:
+        t = t.unsqueeze(0)
+
+    abs = torch.abs(t)
+    # Things large enough that we can't round them off to zero and small enough
+    # that we need scientific notation to print them or if anything's big enough
+    # that we need scientific notation.
+    sci_mode = (
+        torch.any(torch.logical_and(abs > min_important_value, abs < 1e-3))
+        or torch.max(abs) > 1e3
+    )
+
+    def fallback():
+        with torch._tensor_str.printoptions(
+            precision=2 if sci_mode else 3,
+            linewidth=col_limit,
+            sci_mode=sci_mode,
+            threshold=0,
+        ):
+            return f"{name}[{shape}], {t.dtype}:\n{t}"
+
+    if len(t.shape) > 2 or t.shape[0] > row_limit:
+        return fallback()
+
+    def f_entry(d, width=0):
+        return f"{d: {width}.2e}" if sci_mode else f"{d: {width}.3f}"
+
+    width = max(len(f_entry(d)) for d in t.flatten().tolist())
+
+    row_width = len(" ".join(f_entry(d, width) for d in t[0].tolist()))
+
+    if row_width > col_limit:
+        return fallback()
+
+    rows = []
+    for row in t:
+        rows.append(" ".join(f_entry(d, width) for d in row.tolist()))
+
+    nl = "\n"
+    return f"{name}[{shape}], {t.dtype}:\n{nl.join(rows)}"
+
+
+def bool_tensor_string(t, print_limit=2048):
+    if t.shape.numel() > print_limit:
+        return ""
+
+    if len(t.shape) > 2:
+        t = t.squeeze()
+    if len(t.shape) < 2:
+        t = t.unsqueeze(0)
+    if len(t.shape) > 2:
+        return ""
+
+    rows = []
+    for row in t:
+        rows.append(" ".join("." if el else "F" for el in row.tolist()))
+
+    return "\n".join(rows)
+
+
 def make_tensor_mismatch_msg(
     actual: torch.Tensor,
     expected: torch.Tensor,
@@ -283,16 +352,42 @@ def make_tensor_mismatch_msg(
     # Ensure that only mismatches are used for the max_rel_diff computation
     rel_diff[matches_flat] = 0
     max_rel_diff, max_rel_diff_flat_idx = torch.max(rel_diff, 0)
+    max_abs_diff_idx = unravel_flat_index(int(max_abs_diff_flat_idx))
+    max_rel_diff_idx = unravel_flat_index(int(max_rel_diff_flat_idx))
+    abs_diff_at_max_rel_diff = abs_diff[max_rel_diff_flat_idx]
+    rel_diff_at_max_abs_diff = rel_diff[max_abs_diff_flat_idx]
+
+    actual_at_max_abs_diff = actual[max_abs_diff_idx].item()
+    actual_at_max_rel_diff = actual[max_rel_diff_idx].item()
+    expected_at_max_abs_diff = expected[max_abs_diff_idx].item()
+    expected_at_max_rel_diff = expected[max_rel_diff_idx].item()
+
+    def print_idx(idx: tuple[int, ...]) -> str:
+        return f"[{', '.join(str(i) for i in idx)}]"
+
     return _make_mismatch_msg(
         default_identifier="Tensor-likes",
         identifier=identifier,
         extra=extra,
         abs_diff=max_abs_diff.item(),
-        abs_diff_idx=unravel_flat_index(int(max_abs_diff_flat_idx)),
+        abs_diff_idx=max_abs_diff_idx,
         atol=atol,
         rel_diff=max_rel_diff.item(),
-        rel_diff_idx=unravel_flat_index(int(max_rel_diff_flat_idx)),
+        rel_diff_idx=max_rel_diff_idx,
         rtol=rtol,
+    ) + (
+        f"\n"
+        f"max abs diff: expected{print_idx(max_abs_diff_idx)} = {expected_at_max_abs_diff}\n"
+        f"              actual{print_idx(max_abs_diff_idx)}   = {actual_at_max_abs_diff}\n"
+        f"              abs_diff{print_idx(max_abs_diff_idx)} = {max_abs_diff:.1e}\n"
+        f"              rel_diff{print_idx(max_abs_diff_idx)} = {rel_diff_at_max_abs_diff:.1e}\n"
+        f"max rel diff: expected{print_idx(max_rel_diff_idx)} = {expected_at_max_rel_diff}\n"
+        f"              actual{print_idx(max_rel_diff_idx)}   = {actual_at_max_rel_diff}\n"
+        f"              abs_diff{print_idx(max_rel_diff_idx)} = {abs_diff_at_max_rel_diff:.1e}\n"
+        f"              rel_diff{print_idx(max_rel_diff_idx)} = {max_rel_diff:.1e}\n"
+        f"{small_tensor_string(expected, name='expected', min_important_value=atol)}\n"
+        f"{small_tensor_string(actual, name='actual', min_important_value=atol)}\n"
+        f"{bool_tensor_string(matches)}"
     )
 
 
